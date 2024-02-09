@@ -11,7 +11,7 @@ We collected publicly available single cell RNA sequence datasets from eight stu
 - scater v.1.22.0
 - scran v1.22.1
 - dittoSeq v1.6.0
-- 
+  
 ## References
 * **TISCH**: Dongqing Sun, Jin Wang, Ya Han, Xin Dong, Jun Ge, Rongbin Zheng, Xiaoying Shi, Binbin Wang, Ziyi Li, Pengfei Ren, Liangdong Sun, Yilv Yan, Peng Zhang, Fan Zhang, Taiwen Li, Chenfei Wang, TISCH: a comprehensive web resource enabling interactive single-cell transcriptome visualization of tumor microenvironment, Nucleic Acids Research, gkaa1020, https://doi.org/10.1093/nar/gkaa1020
 * **MAESTRO**: Wang C., Sun D., Huang X., Wan C., Li Z., Han Y., Qin Q., Fan J., Qiu X., Xie Y. et al. . Integrative analyses of single-cell transcriptome and regulome using MAESTRO. Genome Biol. 2020; 21:198.
