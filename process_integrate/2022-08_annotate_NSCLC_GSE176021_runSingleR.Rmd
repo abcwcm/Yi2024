@@ -1,0 +1,128 @@
+---
+title: "UMAPs"
+date: "`r Sys.Date()`"
+output:
+    html_document:
+        toc: true
+        code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE, cache.lazy = FALSE, warning=FALSE, message=FALSE)
+```
+
+```{r libraries, chache=FALSE}
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(patchwork)
+library(BiocParallel)
+options(menu.graphics=FALSE)
+library(SingleCellExperiment)
+library(DropletUtils)
+library(scater)
+library(scran)
+library(magrittr)
+options(scipen=1000000)
+data_dir <-  "/athena/abc/scratch/paz2005/projects/2022_07_klebanoff_fei_scRNAseq/unfiltered_sce/"
+setwd(data_dir)
+```
+
+```{r nsclc_vs_nsclc, eval=TRUE}
+files = "sce_TISCH_filtered_not_annotated_sampleIntegration_NSCLC_GSE176021_2022-07-26.rds"
+
+scel <- lapply(files, function(x){ 
+ sce = readRDS(x)
+ }) 
+
+names(scel) = gsub(".*/","",files) %>% gsub("sce_TISCH_filtered_not_annotated_sampleIntegration_","",.) %>% gsub("_2022-07-26.rds","",.)
+
+# http://bioconductor.org/books/release/SingleRBook/using-multiple-references.html
+files <-  "sce_unfiltered_NSCLC_GSE117570_2022-07-22.rds"
+
+scel_ref <- lapply(files, function(x){ 
+ sce = readRDS(x)
+ }) 
+
+names(scel_ref) =  "NSCLC_GSE117570"
+
+scel_ref$NSCLC_GSE117570 <- logNormCounts(scel_ref$NSCLC_GSE117570) 
+
+
+library(SingleR)
+
+set.seed(123)
+p = bpstart(MulticoreParam(6))
+
+predictedLabels <- SingleR(test=scel$NSCLC_GSE176021, ref=scel_ref$NSCLC_GSE117570, labels=scel_ref$NSCLC_GSE117570$Celltype.Major, BPPARAM=p)
+
+saveRDS(predictedLabels, "NSCLC_GSE176021_vs_NSCLC_GSE117570_Celltype.Major.RDS")								
+```
+
+
+**For proper labeling, we should probably use `SingleR`, using all other TILs/normal samples as references.**
+
+so, exclude 
+CLL_GSE111014
+NSCLC_GSE117570
+UVM_GSE139829
+and ALL_GSE132509 marked as tumor_blood
+
+
+```{r nsclc_vs_all, eval=TRUE}
+files <- list.files(path=".", pattern  = "sce_unfiltered_*",full.names = TRUE)
+# remove KIRC_GSE111360
+files = grep("NSCLC_GSE176021", files, invert=T, value=T)
+
+scel_ref <- lapply(files, function(x){ 
+ sce = readRDS(x)
+ sce = sce[,sce$isAnnotated == TRUE]
+ row.names(sce) <- scater::uniquifyFeatureNames(rowData(sce)$ID, rowData(sce)$Symbol)
+ sce
+ }) 
+
+names(scel_ref) = gsub(".*/","",files) %>% gsub("sce_unfiltered_","",.) %>% gsub("_2022-07-22.rds","",.) %>% gsub("_2022-08-30.rds","",.)
+
+scel_ref = lapply(scel_ref, logNormCounts)
+lapply(scel_ref, assayNames)
+
+# normal blood from  ALL_GSE132509 = 
+#GSM3872442
+#GSM3872443
+#GSM3872444
+scel_ref$ALL_GSE132509 = scel_ref$ALL_GSE132509[,scel_ref$ALL_GSE132509$Accession %in% c("GSM3872442", "GSM3872443", "GSM3872444")]
+
+library(SingleR)
+
+set.seed(123)
+p = bpstart(MulticoreParam(3))
+
+
+predictedLabels <- SingleR(
+    test=scel$NSCLC_GSE176021, 
+    assay.type.test="logcounts", 
+    ref = list(ALL_GSE132509=scel_ref$ALL_GSE132509, 
+             CRC_GSE146771_10X=scel_ref$CRC_GSE146771_10X,
+             KIRC_GSE111360=scel_ref$KIRC_GSE111360,
+             SKCM_GSE148190=scel_ref$SKCM_GSE148190), 
+    labels = list(scel_ref$ALL_GSE132509$Celltype.Major,
+                  scel_ref$CRC_GSE146771_10X$Celltype.Major,
+                  scel_ref$KIRC_GSE111360$Celltype.Major,
+                  scel_ref$SKCM_GSE148190$Celltype.Major), 
+    BPPARAM=p)
+									
+saveRDS(predictedLabels, "NSCLC_GSE176021_vs_all_Celltype.Major.RDS")							
+
+	
+```
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
+
+
