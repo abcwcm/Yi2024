@@ -1,0 +1,169 @@
+---
+title: "Read in files"
+subtitle: "CRC_GSE146771_10X"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+    html_document:
+        toc: true
+        code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE, cache=FALSE, echo=FALSE)
+```
+
+```{r libraries, chache=FALSE}
+# conda activate laura
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(patchwork)
+library(BiocParallel)
+options(menu.graphics=FALSE)
+library(SingleCellExperiment)
+library(DropletUtils)
+library(scater)
+library(scran)
+library(magrittr)
+library(rhdf5)
+library(Matrix)
+
+dataset="CRC_GSE146771_10X"
+data_dir <- "/athena/abc/scratch/paz2005/projects/2022_07_klebanoff_fei_scRNAseq/datasets/raw_CRC_GSE146771_10X/"
+
+setwd(data_dir)
+```
+
+
+# Samples
+
+We have the following samples:
+
+```{r read_sample_table, results='asis'}
+metadata <- fread(paste0(data_dir, "CRC_GSE146771_10X_metadata.csv"))
+metadata$Sample = metadata$Sample  %>% gsub("P_N_", "",.)  %>% gsub("P_P_", "",.)  %>% gsub("P_T_", "",.)
+kable(metadata, row.names=FALSE,  padding = 0, longtable=TRUE) 
+```
+
+
+```{r read_TISCH_cell_annotations, results='asis'}
+cell_annot <- fread(paste0(data_dir, "CRC_GSE146771_10X_CellMetainfo_table.tsv"))
+k <- 3
+cell_annot$Sample = substr(cell_annot$Cell, 1, sapply(gregexpr("_", cell_annot$Cell), "[", k) - 1) %>% gsub("P_N_", "",.)  %>% gsub("P_P_", "",.)  %>% gsub("P_T_", "",.)
+cell_annot$Barcode = cell_annot$Cell
+setnames(cell_annot, "Celltype (malignancy)" , "Celltype.Malignancy")
+setnames(cell_annot, "Celltype (major-lineage)", "Celltype.Major")
+setnames(cell_annot, "Celltype (minor-lineage)", "Celltype.Minor")
+setnames(cell_annot, "UMAP_1", "TISCH.UMAP_1")
+setnames(cell_annot, "UMAP_2", "TISCH.UMAP_2")
+setnames(cell_annot, "Cluster", "TISCH.Cluster")
+
+cell_annot = merge(cell_annot, metadata, by="Sample") %>% as.data.frame()
+row.names(cell_annot) = cell_annot$Cell
+cell_annot = cell_annot[,c("Cell", "Celltype.Malignancy", "Celltype.Major", "Celltype.Minor", "TISCH.UMAP_1", "TISCH.UMAP_2","TISCH.Cluster")]
+```
+
+## Reading data in
+
+Reading in raw from figshare  https://figshare.com/articles/dataset/CRC_CD45_rda/14820318
+
+```{r loading_10X_output, eval=TRUE}
+load("CLX_expression.rda")
+library(Matrix)
+counts = Matrix(CLX_expression_data$raw_counts)
+
+table(colnames(counts) %in% cell_annot$Cell)
+
+table(colnames(counts) %in% cell_annot$Cell)
+
+sce.all <- SingleCellExperiment(list(counts=counts),
+    colData=DataFrame(Cell=colnames(counts)),
+    rowData=DataFrame(Symbol=rownames(counts)),
+)
+
+# only keep tisch annotated cells:
+
+sce.all = sce.all[,cell_annot$Cell]
+
+rowdata = rowData(sce.all)
+library("org.Hs.eg.db") 
+ens <- mapIds(org.Hs.eg.db, keys = rowdata$Symbol, keytype = "SYMBOL", column="ENSEMBL")
+#table(names(ens) == rowdata$Symbol)
+rowdata$ID = ens
+rowData(sce.all) = rowdata
+ 
+## add metadata
+k <- 3
+sce.all$Sample = substr(colData(sce.all)$Cell, 1, sapply(gregexpr("_", colData(sce.all)$Cell), "[", k) - 1) %>% gsub("P_N_", "",.)  %>% gsub("P_P_", "",.)  %>% gsub("P_T_", "",.)
+row.names(colData(sce.all)) = colData(sce.all)$Cell
+
+#table(sce.all$Sample[which(!(sce.all$Sample %in% metadata$Sample))])
+
+
+coldata  <- dplyr::left_join(as.data.frame(colData(sce.all)), metadata, by = "Sample")
+coldata <- dplyr::left_join(coldata, cell_annot, by = 'Cell')
+row.names(coldata) = coldata$Cell
+#table(colnames(sce.all) %in% row.names(coldata))
+
+coldata = coldata[row.names(colData(sce.all)),]
+coldata = DataFrame(coldata)
+table(row.names( colData(sce.all)) == row.names(coldata))
+table(colnames(sce.all) == row.names(coldata))
+
+colData(sce.all) = coldata
+
+## remove completely uncovered genes
+gnszero <- Matrix::rowSums(counts(sce.all)) == 0
+sce.all <- sce.all[!gnszero, ]
+
+## add QC info
+is.mito <- grepl("mt-", ignore.case = TRUE, rowData(sce.all)$Symbol)
+sce.all <- addPerCellQC(sce.all, subsets=list(mitochondrial=is.mito))
+
+mm <- lapply(unique(sce.all$Sample), function(x){
+        ss <- sce.all[, sce.all$Sample == x]$subsets_mitochondrial_percent
+        isOutlier(ss, type = "higher")})
+sce.all$mito.discard <- unlist(mm)
+sce.all$mito.discard <- ifelse(is.na(sce.all$mito.discard), FALSE, sce.all$mito.discard)
+
+## determine GENE count thresholds for each Sample individually
+gg <- lapply(unique(sce.all$Sample), function(x){
+    ss <- log10(sce.all[, sce.all$Sample == x]$detected)
+    isOutlier(ss)
+})
+sce.all$gene.discard <- unlist(gg)
+
+sce.all$nUMI <- colSums(counts(sce.all))
+sce.all$nGene <- colSums(counts(sce.all) != 0)
+sce.all$log10GenesPerUMI <- log10(sce.all$detected) / log10(sce.all$sum)
+sce.all$isAnnotated <- !is.na(sce.all$TISCH.UMAP_1)
+
+set.seed(123)
+p = bpstart(MulticoreParam(14))
+hg.pairs <- readRDS(system.file("exdata", "human_cycle_markers.rds", package="scran"))
+cc.assignments <- cyclone(sce.all, hg.pairs, gene.names=rowData(sce.all)$ID, BPPARAM=p)
+colData(sce.all)$cc_phase <- cc.assignments$phases
+colData(sce.all)$G1score <- cc.assignments$score$G1
+colData(sce.all)$G2Mscore <- cc.assignments$score$G2M
+colData(sce.all)$Sscore <- cc.assignments$score$S
+
+## save colData
+library(data.table)
+cd <-colData(sce.all) 
+cd <- as.data.frame(cd) %>% as.data.table
+#saveRDS(cd, file = paste0("colData_unfiltered_",dataset,"_", Sys.Date(), ".rds"))
+#saveRDS(sce.all, file = paste0("sce_unfiltered_",dataset,"_", Sys.Date(), ".rds"))
+saveRDS(cd, file = "colData_unfiltered_CRC_GSE146771_10X_2022-07-22.rds")
+saveRDS(sce.all, file = "sce_unfiltered_CRC_GSE146771_10X_2022-07-22.rds")
+```
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
+
+

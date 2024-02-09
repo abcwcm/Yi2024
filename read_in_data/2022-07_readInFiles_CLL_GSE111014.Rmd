@@ -1,0 +1,156 @@
+---
+title: "Read in files"
+subtitle: "CLL_GSE111014"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+    html_document:
+        toc: true
+        code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE, cache=FALSE, echo=FALSE)
+```
+
+```{r libraries, chache=FALSE}
+# on server: /athena/abc/scratch/paz2005/miniconda3_v5/bin/conda
+#$ conda activate laura
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(patchwork)
+library(BiocParallel)
+options(menu.graphics=FALSE)
+library(SingleCellExperiment)
+library(DropletUtils)
+library(scater)
+library(scran)
+library(magrittr)
+
+dataset="CLL_GSE111014"
+data_dir <- "/athena/abc/scratch/paz2005/projects/2022_07_klebanoff_fei_scRNAseq/datasets/CLL_GSE111014/"
+
+setwd(data_dir)
+```
+
+
+# Samples
+
+We have the following samples:
+
+```{r read_sample_table, results='asis'}
+metadata <- fread(paste0(data_dir, "CLL_GSE111014_metadata.csv"))
+
+kable(metadata, row.names=FALSE,  padding = 0, longtable=TRUE) 
+```
+
+
+```{r read_TISCH_cell_annotations, results='asis'}
+cell_annot <- fread(paste0(data_dir, "CLL_GSE111014_CellMetainfo_table.tsv"))
+cell_annot$Barcode =gsub("-.*","",cell_annot$Cell)
+cell_annot$Sample =  gsub("seq_","", gsub(".*-","",cell_annot$Cell))
+setnames(cell_annot, "Celltype (malignancy)" , "Celltype.Malignancy")
+setnames(cell_annot, "Celltype (major-lineage)", "Celltype.Major")
+setnames(cell_annot, "Celltype (minor-lineage)", "Celltype.Minor")
+setnames(cell_annot, "UMAP_1", "TISCH.UMAP_1")
+setnames(cell_annot, "UMAP_2", "TISCH.UMAP_2")
+setnames(cell_annot, "Cluster", "TISCH.Cluster")
+
+
+cell_annot = merge(cell_annot, metadata, by="Sample") %>% as.data.frame()
+row.names(cell_annot) = cell_annot$Cell
+cell_annot = cell_annot[,c("Cell", "Celltype.Malignancy", "Celltype.Major", "Celltype.Minor", "TISCH.UMAP_1", "TISCH.UMAP_2","TISCH.Cluster")]
+```
+
+## Reading data in
+
+```{r loading_10X_output, eval=TRUE}
+# https://github.com/MarioniLab/DropletUtils/issues/32
+prefix = c("GSE111014_")
+		
+sce.all <- read10xCounts(
+ paste0(data_dir, prefix),
+ sample.names =gsub("\\_.*", "", prefix),
+ type="prefix",
+ version = "auto")
+ 
+## add metadata
+sce.all$Cell = sce.all$Barcode
+#sce.all$Accession = sce.all$Sample
+row.names(colData(sce.all)) = colData(sce.all)$Cell
+
+# remove samples that are not: CLL1-pre, CLL5-pre, CLL5-pre, CLL8-pre
+keep = grep("CLL1_d0|CLL5_d0|CLL6_d0|CLL8_d0", colnames(sce.all))
+sce.all = sce.all[,keep]
+
+ 
+## add metadata
+#sce.all$Cell = paste0(sce.all$Sample,"@",sce.all$Barcode)
+sce.all$Sample =  gsub("seq_","", gsub(".*-","",sce.all$Cell))
+row.names(colData(sce.all)) = colData(sce.all)$Cell
+
+coldata  <- dplyr::left_join(as.data.frame(colData(sce.all)), metadata, by = "Sample")
+coldata <- dplyr::left_join(coldata, cell_annot, by = 'Cell')
+row.names(coldata) = coldata$Cell
+#table(colnames(sce.all) %in% row.names(coldata))
+
+coldata = coldata[row.names(colData(sce.all)),]
+coldata = DataFrame(coldata)
+table(row.names( colData(sce.all)) == row.names(coldata))
+table(colnames(sce.all) == row.names(coldata))
+
+colData(sce.all) = coldata
+
+## remove completely uncovered genes
+gnszero <- Matrix::rowSums(counts(sce.all)) == 0
+sce.all <- sce.all[!gnszero, ]
+
+## add QC info
+is.mito <- grepl("mt-", ignore.case = TRUE, rowData(sce.all)$Symbol)
+sce.all <- addPerCellQC(sce.all, subsets=list(mitochondrial=is.mito))
+
+mm <- lapply(unique(sce.all$Sample), function(x){
+        ss <- sce.all[, sce.all$Sample == x]$subsets_mitochondrial_percent
+        isOutlier(ss, type = "higher")})
+sce.all$mito.discard <- unlist(mm)
+sce.all$mito.discard <- ifelse(is.na(sce.all$mito.discard), FALSE, sce.all$mito.discard)
+
+## determine GENE count thresholds for each Sample individually
+gg <- lapply(unique(sce.all$Sample), function(x){
+    ss <- log10(sce.all[, sce.all$Sample == x]$detected)
+    isOutlier(ss)
+})
+sce.all$gene.discard <- unlist(gg)
+
+sce.all$nUMI <- colSums(counts(sce.all))
+sce.all$nGene <- colSums(counts(sce.all) != 0)
+sce.all$log10GenesPerUMI <- log10(sce.all$detected) / log10(sce.all$sum)
+sce.all$isAnnotated <- !is.na(sce.all$TISCH.UMAP_1)
+
+set.seed(123)
+p = bpstart(MulticoreParam(14))
+hg.pairs <- readRDS(system.file("exdata", "human_cycle_markers.rds", package="scran"))
+cc.assignments <- cyclone(sce.all, hg.pairs, gene.names=rowData(sce.all)$ID, BPPARAM=p)
+colData(sce.all)$cc_phase <- cc.assignments$phases
+colData(sce.all)$G1score <- cc.assignments$score$G1
+colData(sce.all)$G2Mscore <- cc.assignments$score$G2M
+colData(sce.all)$Sscore <- cc.assignments$score$S
+
+## save colData
+library(data.table)
+cd <-colData(sce.all) 
+cd <- as.data.frame(cd) %>% as.data.table
+saveRDS(cd, file = paste0("colData_unfiltered_",dataset,"_", Sys.Date(), ".rds"))
+saveRDS(sce.all, file = paste0("sce_unfiltered_",dataset,"_", Sys.Date(), ".rds"))
+```
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
+
+

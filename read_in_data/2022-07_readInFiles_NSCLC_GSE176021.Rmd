@@ -1,0 +1,133 @@
+---
+title: "Read in files"
+subtitle: "NSCLC_GSE176021"
+date: '`r format(Sys.Date(), "%Y-%B-%d")`'
+output:
+    html_document:
+        toc: true
+        code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE, cache=FALSE, echo=FALSE)
+```
+
+```{r libraries, chache=FALSE}
+#$ conda activate laura
+library(data.table)
+library(magrittr)
+library(knitr)
+library(ggplot2); theme_set(theme_bw(base_size = 16))
+library(patchwork)
+library(BiocParallel)
+options(menu.graphics=FALSE)
+library(SingleCellExperiment)
+library(DropletUtils)
+library(scater)
+library(scran)
+library(magrittr)
+
+dataset="NSCLC_GSE176021"
+data_dir <- "/athena/abc/scratch/paz2005/projects/2022_07_klebanoff_fei_scRNAseq/datasets/NSCLC_GSE176021/"
+
+setwd(data_dir)
+
+```
+
+
+# Samples
+
+We have the following samples:
+
+```{r read_sample_table, results='asis'}
+metadata <- fread(paste0(data_dir, "NSCLC_GSE176021_metadata.csv"))
+
+kable(metadata, row.names=FALSE,  padding = 0, longtable=TRUE) 
+```
+
+
+## Reading data in
+
+No annotation from TISCH
+
+```{r loading_10X_output, eval=TRUE}
+# https://github.com/MarioniLab/DropletUtils/issues/32
+prefix = c("MD043-011_LN_1",
+"MD043-011_mettumor_1",
+"MD043-011_normal_1",
+"MD043-011_tumor_2")
+		
+sce.all <- read10xCounts(
+ paste0(data_dir, prefix),
+ sample.names =prefix,
+ type="auto",
+ version = "auto")
+ 
+## add metadata
+sce.all$Cell = paste0(sce.all$Sample,"@",sce.all$Barcode)
+row.names(colData(sce.all)) = colData(sce.all)$Cell
+
+coldata  <- dplyr::left_join(as.data.frame(colData(sce.all)), metadata, by = "Sample")
+row.names(coldata) = coldata$Cell
+#table(colnames(sce.all) %in% row.names(coldata))
+
+coldata = coldata[row.names(colData(sce.all)),]
+coldata = DataFrame(coldata)
+#table(row.names( colData(sce.all)) == row.names(coldata))
+#table(colnames(sce.all) == row.names(coldata))
+
+colData(sce.all) = coldata
+
+## remove completely uncovered genes
+gnszero <- Matrix::rowSums(counts(sce.all)) == 0
+sce.all <- sce.all[!gnszero, ]
+
+## add QC info
+is.mito <- grepl("mt-", ignore.case = TRUE, rowData(sce.all)$Symbol)
+sce.all <- addPerCellQC(sce.all, subsets=list(mitochondrial=is.mito))
+
+mm <- lapply(unique(sce.all$Sample), function(x){
+        ss <- sce.all[, sce.all$Sample == x]$subsets_mitochondrial_percent
+        isOutlier(ss, type = "higher")})
+sce.all$mito.discard <- unlist(mm)
+sce.all$mito.discard <- ifelse(is.na(sce.all$mito.discard), FALSE, sce.all$mito.discard)
+
+## determine GENE count thresholds for each Sample individually
+gg <- lapply(unique(sce.all$Sample), function(x){
+    ss <- log10(sce.all[, sce.all$Sample == x]$detected)
+    isOutlier(ss)
+})
+sce.all$gene.discard <- unlist(gg)
+
+sce.all$nUMI <- colSums(counts(sce.all))
+sce.all$nGene <- colSums(counts(sce.all) != 0)
+sce.all$log10GenesPerUMI <- log10(sce.all$detected) / log10(sce.all$sum)
+sce.all$isAnnotated <- FALSE
+
+set.seed(123)
+p = bpstart(MulticoreParam(14))
+hg.pairs <- readRDS(system.file("exdata", "human_cycle_markers.rds", package="scran"))
+cc.assignments <- cyclone(sce.all, hg.pairs, gene.names=rowData(sce.all)$ID, BPPARAM=p)
+colData(sce.all)$cc_phase <- cc.assignments$phases
+colData(sce.all)$G1score <- cc.assignments$score$G1
+colData(sce.all)$G2Mscore <- cc.assignments$score$G2M
+colData(sce.all)$Sscore <- cc.assignments$score$S
+
+
+## save colData
+library(data.table)
+cd <-colData(sce.all) 
+cd <- as.data.frame(cd) %>% as.data.table
+saveRDS(cd, file = paste0("colData_unfiltered_",dataset,"_", Sys.Date(), ".rds"))
+saveRDS(sce.all, file = paste0("sce_unfiltered_",dataset,"_", Sys.Date(), ".rds"))
+```
+
+
+# Session Info
+```{r session, message=FALSE, warning=FALSE, cache=FALSE,echo=FALSE, fig.width=10, fig.height=5.5, context="data"}
+sessionInfo()
+```
+
+
